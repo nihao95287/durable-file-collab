@@ -1,0 +1,31 @@
+# Local runtime state and file objects
+*.db
+*.db-shm
+*.db-wal
+data/
+storage/
+tmp/
+uploads/
+logs/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Common generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+dist/
+build/
+*.log
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
