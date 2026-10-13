@@ -1,0 +1,135 @@
+-- 0001 初始结构（基线迁移）
+-- 归属：P1 独占维护。其他成员以「字段需求」的形式提出变更，由 P1 落库（见 docs/Interfaces.md §6）。
+-- 应用：apply_migrations() 按文件名顺序执行，已应用的名字记在 schema_migrations 表。
+-- 要求：迁移里的 DDL 必须写成幂等形式（IF NOT EXISTS 等），重复执行不得报错；
+--       新建库走 db/schema.sql，存量库走本目录的迁移，两者结构一致性由契约测试 C-13 校验。
+
+PRAGMA foreign_keys = ON;
+
+-- ============================ P1 独占：持久化队列 ============================
+
+CREATE TABLE IF NOT EXISTS delivery_tasks (
+    task_id       TEXT PRIMARY KEY,              -- 创建方生成，全局唯一且不可变
+    kind          TEXT NOT NULL,                 -- 任务类型，取值见 TASK_KINDS
+    payload       TEXT NOT NULL,                 -- JSON 字符串，P1 原样存储，不解释业务字段
+    state         TEXT NOT NULL,                 -- 见 src/storage/statemachine.py 的 STATES
+    sender_id     TEXT,                          -- 路由冗余列：仅从 payload 提取 sender_id/receiver_id/size_bytes
+    receiver_id   TEXT,
+    size_bytes    INTEGER NOT NULL DEFAULT 0,
+    acked_bytes   INTEGER NOT NULL DEFAULT 0,
+    total_chunks  INTEGER NOT NULL DEFAULT 0,
+    acked_chunks  INTEGER NOT NULL DEFAULT 0,
+    retry_count   INTEGER NOT NULL DEFAULT 0,
+    max_retries   INTEGER NOT NULL DEFAULT 5,
+    next_run_at   INTEGER NOT NULL,              -- UTC 毫秒；最早可执行时间
+    last_error    TEXT,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_claimable ON delivery_tasks(state, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_receiver  ON delivery_tasks(receiver_id, state);
+CREATE INDEX IF NOT EXISTS idx_tasks_sender    ON delivery_tasks(sender_id, state);
+
+CREATE TABLE IF NOT EXISTS task_chunks (
+    task_id      TEXT    NOT NULL REFERENCES delivery_tasks(task_id) ON DELETE CASCADE,
+    chunk_no     INTEGER NOT NULL,
+    offset_bytes INTEGER NOT NULL,
+    length_bytes INTEGER NOT NULL,
+    checksum     TEXT,                            -- 首次 ack 时写入；重复 ack 必须与它一致
+    state        TEXT    NOT NULL DEFAULT 'pending',  -- pending | acked
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    acked_at     INTEGER,
+    last_error   TEXT,
+    PRIMARY KEY (task_id, chunk_no)
+);
+
+CREATE TABLE IF NOT EXISTS queue_claims (
+    task_id             TEXT PRIMARY KEY REFERENCES delivery_tasks(task_id) ON DELETE CASCADE,
+    worker_id           TEXT    NOT NULL,
+    attempt             INTEGER NOT NULL DEFAULT 1,
+    claimed_at          INTEGER NOT NULL,
+    visibility_deadline INTEGER NOT NULL          -- 超时后由 recover 清理并重新入队
+);
+
+CREATE INDEX IF NOT EXISTS idx_claims_deadline ON queue_claims(visibility_deadline);
+
+CREATE TABLE IF NOT EXISTS task_events (
+    event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    TEXT    NOT NULL,
+    event      TEXT    NOT NULL,                  -- 见 src/storage/events.py 的 EVENT_TYPES
+    from_state TEXT,
+    to_state   TEXT,
+    actor      TEXT    NOT NULL,                  -- P1 / P2 / P3 / P4
+    detail     TEXT,                              -- JSON 字符串
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_task ON task_events(task_id, event_id);
+
+-- ============================ 其他负责人独占（字段草案，待第 1 周评审确认） ============================
+
+-- P2 独占：用户会话
+CREATE TABLE IF NOT EXISTS users (
+    user_id      TEXT PRIMARY KEY,
+    display_name TEXT,
+    online       INTEGER NOT NULL DEFAULT 0,
+    last_seen    INTEGER
+);
+
+-- P3 独占：项目空间、成员、版本与租约
+CREATE TABLE IF NOT EXISTS project_spaces (
+    space_id   TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS space_members (
+    space_id TEXT NOT NULL REFERENCES project_spaces(space_id) ON DELETE CASCADE,
+    user_id  TEXT NOT NULL,
+    role     TEXT NOT NULL,                       -- read | write | admin
+    PRIMARY KEY (space_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS files (
+    file_id      TEXT PRIMARY KEY,
+    space_id     TEXT NOT NULL REFERENCES project_spaces(space_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    head_version INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS file_versions (
+    file_id      TEXT    NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+    version_no   INTEGER NOT NULL,
+    created_by   TEXT,
+    base_version INTEGER,
+    checksum     TEXT,
+    object_path  TEXT    NOT NULL,                -- 只能由 objectstore.publish 产生
+    is_conflict  INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (file_id, version_no)
+);
+
+CREATE TABLE IF NOT EXISTS leases (
+    file_id     TEXT PRIMARY KEY REFERENCES files(file_id) ON DELETE CASCADE,
+    holder_id   TEXT    NOT NULL,
+    token       TEXT    NOT NULL UNIQUE,
+    acquired_at INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_leases_expiry ON leases(expires_at);
+
+-- P4 独占：追加式审计
+CREATE TABLE IF NOT EXISTS audit_logs (
+    log_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type  TEXT NOT NULL,                    -- <模块>.<动作>
+    actor_id    TEXT,
+    target_type TEXT,
+    target_id   TEXT,
+    detail      TEXT,                             -- JSON 字符串
+    created_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_logs(target_id, log_id);

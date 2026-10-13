@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.common.timeutil import now_ms
+from src.storage.config import QueueConfig
 from src.storage.db import DEFAULT_DB_PATH, ROOT_DIR, ensure_data_dirs, init_database
 from src.storage.queue import Queue
 
@@ -115,6 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite 数据库路径")
     parser.add_argument("--interval-ms", type=int, default=500, help="调度周期")
     parser.add_argument("--recover-every-ms", type=int, default=5_000, help="恢复扫描周期")
+    parser.add_argument(
+        "--visibility-timeout-ms",
+        type=int,
+        default=30_000,
+        help="claim 可见性超时（P1 配置项；演示/验收时可调小）",
+    )
     parser.add_argument("--pidfile", default=str(DEFAULT_PIDFILE), help="pid 文件路径")
     parser.add_argument("--once", action="store_true", help="只执行一个调度周期后退出")
     parser.add_argument("--init-db", action="store_true", help="先建库（幂等）再启动")
@@ -134,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
         init_database(args.db) if args.init_db else _open_existing(args.db)
     )
     daemon = Daemon(
-        Queue(conn),
+        Queue(conn, config=QueueConfig(visibility_timeout_ms=args.visibility_timeout_ms)),
         interval_ms=args.interval_ms,
         recover_every_ms=args.recover_every_ms,
     )

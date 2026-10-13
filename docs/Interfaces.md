@@ -341,6 +341,7 @@ DDL 与迁移脚本只能由 P1 提交；其他成员以字段需求的形式提
 | C-10 | 每张表只出现一个写入方（静态检查 SQL 归属） | P1 |
 | C-11 | `queued` 任务经 `dispatch_offline`/`dispatch_online`/`dispatch_immediate` 分流后，`claim` 只认领 `transferring`/`network_wait` | P1 |
 | C-12 | P1 的审计事件通过 `join_tx` 与业务变更同事务（回滚后审计记录一并消失） | P1、P4 |
+| C-13 | 迁移文件（`db/migrations/*.sql`）与 `db/schema.sql` 的结构一致，且可重复应用 | P1 |
 
 ## 8 变更记录
 

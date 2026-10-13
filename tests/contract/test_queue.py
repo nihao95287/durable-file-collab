@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import inspect
 import json
+import multiprocessing
 import re
 import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -31,8 +33,14 @@ from src.common.errors import (  # noqa: E402
     TaskNotFound,
 )
 from src.storage import statemachine  # noqa: E402
-from src.storage.config import QueueConfig  # noqa: E402
-from src.storage.db import connect, ensure_data_dirs, init_database, retry_on_busy  # noqa: E402
+from src.storage.config import QueueConfig, RetryPolicy  # noqa: E402
+from src.storage.db import (  # noqa: E402
+    apply_migrations,
+    connect,
+    ensure_data_dirs,
+    init_database,
+    retry_on_busy,
+)
 from src.storage.events import EVENT_TYPES, list_events  # noqa: E402
 from src.storage.hooks import HookRegistry  # noqa: E402
 from src.storage.queue import TASK_KINDS, VIEW_NAMES, Queue  # noqa: E402
@@ -805,3 +813,171 @@ class TestSqlOwnership(unittest.TestCase):
         self.assertTrue(
             self.QUEUE_TABLES <= found, f"未扫描到写语句: {self.QUEUE_TABLES - found}"
         )
+
+
+def _claim_worker(db_path: str, worker_id: str, now: int, out: object) -> None:
+    """子进程入口：在独立进程里尝试认领同一个任务。"""
+
+    conn = connect(db_path)
+    try:
+        claim = Queue(conn, clock=lambda: now).claim(worker_id, now)
+        out.put(None if claim is None else claim.task_id)  # type: ignore[attr-defined]
+    finally:
+        conn.close()
+
+
+class TestConcurrency(QueueContractCase):
+    """C-03 的进程级版本：多进程竞争同一任务，只能有一个赢家。"""
+
+    def test_c03_multiprocess_claim_has_single_winner(self) -> None:
+        task_id = self.enqueue_delivery()
+        self.move_to_transferring(task_id)
+
+        methods = multiprocessing.get_all_start_methods()
+        context = multiprocessing.get_context("fork" if "fork" in methods else "spawn")
+        out = context.Queue()
+        workers = [
+            context.Process(
+                target=_claim_worker, args=(str(self.db_path), f"w-{i}", self.clock(), out)
+            )
+            for i in range(4)
+        ]
+        for proc in workers:
+            proc.start()
+        for proc in workers:
+            proc.join(timeout=30)
+        self.assertTrue(all(not proc.is_alive() for proc in workers), "子进程未在 30s 内结束")
+
+        results = [out.get(timeout=5) for _ in workers]
+        winners = [result for result in results if result is not None]
+        self.assertEqual(len(winners), 1, f"只能有一个赢家，实际: {results}")
+        self.assertEqual(winners[0], task_id)
+
+    def test_retry_on_busy_waits_for_the_writer_lock(self) -> None:
+        """写者竞争：另一个连接持有写锁时，claim 通过退避重试最终成功。"""
+
+        task_id = self.enqueue_delivery()
+        self.move_to_transferring(task_id)
+
+        holder = connect(self.db_path)
+        holder.execute("PRAGMA busy_timeout = 0")
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("UPDATE delivery_tasks SET updated_at = 0 WHERE task_id = ?", (task_id,))
+
+        outcome: dict[str, object] = {}
+
+        def contender() -> None:
+            # sqlite3 连接不能跨线程使用：在子线程里自己开一个连接
+            seeker = connect(self.db_path)
+            seeker.execute("PRAGMA busy_timeout = 0")
+            queue = Queue(seeker, clock=self.clock)
+            try:
+                outcome["claim"] = retry_on_busy(
+                    lambda: queue.claim("w-2", self.clock()), attempts=40, base_delay=0.02
+                )
+            except Exception as exc:  # noqa: BLE001 - 把异常带回主线程断言
+                outcome["error"] = exc
+            finally:
+                seeker.close()
+
+        thread = threading.Thread(target=contender, daemon=True)
+        thread.start()
+        time.sleep(0.2)  # 让 seeker 先撞上 database is locked
+        self.assertNotIn("claim", outcome, "写锁未释放前不应认领成功")
+        holder.execute("COMMIT")
+        thread.join(timeout=15)
+        holder.close()
+
+        self.assertNotIn("error", outcome, f"重试后仍然失败: {outcome.get('error')}")
+        self.assertIsNotNone(outcome.get("claim"))
+        self.assertEqual(self.state_of(task_id), "transferring")
+
+
+class TestBackoffCurve(QueueContractCase):
+    """重试间隔、退避曲线是 P1 的配置项（契约 §2），这里锁住它的行为。"""
+
+    def test_backoff_curve_and_cap(self) -> None:
+        policy = RetryPolicy(initial_delay_ms=1_000, multiplier=2.0, max_delay_ms=5_000)
+        self.assertEqual(
+            [policy.backoff_ms(attempt) for attempt in range(1, 6)],
+            [1_000, 2_000, 4_000, 5_000, 5_000],
+        )
+        self.assertEqual(policy.backoff_ms(0), 1_000, "attempt 从 1 起算，0 按 1 处理")
+
+    def test_successive_nacks_follow_the_curve_then_fail(self) -> None:
+        task_id = self.enqueue_delivery()
+        self.move_to_transferring(task_id)
+        self.queue.claim("w-1", self.clock())
+
+        for attempt, delay in enumerate([1_000, 2_000, 4_000, 8_000, 16_000], start=1):
+            self.queue.nack(task_id, 0, f"fail-{attempt}", True)
+            row = self.conn.execute(
+                """
+                SELECT retry_count, next_run_at, state
+                  FROM delivery_tasks WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            self.assertEqual(row["retry_count"], attempt)
+            self.assertEqual(row["next_run_at"], self.clock() + delay)
+            self.assertEqual(row["state"], "network_wait")
+
+        with self.assertRaises(RetryExhausted):  # 第 6 次超过 max_retries=5
+            self.queue.nack(task_id, 0, "fail-6", True)
+        self.assertEqual(self.state_of(task_id), "failed")
+
+
+class TestMigrations(unittest.TestCase):
+    """C-13：迁移文件与 db/schema.sql 的结构必须一致，且迁移可重复应用。"""
+
+    def _structure(self, conn: sqlite3.Connection) -> dict[str, dict[str, set]]:
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        } - {"schema_migrations"}
+        structure: dict[str, dict[str, set]] = {}
+        for table in tables:
+            structure[table] = {
+                "columns": {
+                    (
+                        row["name"],
+                        (row["type"] or "").upper(),
+                        row["notnull"],
+                        row["dflt_value"],
+                        row["pk"],
+                    )
+                    for row in conn.execute(f"PRAGMA table_info({table})")
+                },
+                "indexes": {
+                    row["name"]
+                    for row in conn.execute(f"PRAGMA index_list({table})")
+                    if not row["name"].startswith("sqlite_autoindex")
+                },
+            }
+        return structure
+
+    def test_c13_migrations_match_schema_sql(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from_schema = init_database(Path(tmp) / "schema.db")
+            expected = self._structure(from_schema)
+            from_schema.close()
+
+            migrated = connect(Path(tmp) / "migrated.db")
+            try:
+                self.assertIn("0001_init.sql", apply_migrations(migrated))
+                self.assertEqual(self._structure(migrated), expected)
+            finally:
+                migrated.close()
+
+    def test_apply_migrations_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "queue.db")
+            try:
+                self.assertEqual(apply_migrations(conn), ["0001_init.sql"])
+                self.assertEqual(apply_migrations(conn), [])
+                rows = conn.execute("SELECT name FROM schema_migrations").fetchall()
+                self.assertEqual([row["name"] for row in rows], ["0001_init.sql"])
+            finally:
+                conn.close()

@@ -1,12 +1,12 @@
-# Local runtime state and file objects
+# Local runtime state and file objects (root-anchored: only the top-level runtime dirs)
+/data/
+/storage/
+/tmp/
+/uploads/
+/logs/
 *.db
 *.db-shm
 *.db-wal
-data/
-storage/
-tmp/
-uploads/
-logs/
 
 # Local configuration and credentials
 .env
