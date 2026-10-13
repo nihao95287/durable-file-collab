@@ -5,6 +5,9 @@
 ## 项目资料
 
 - [需求分析与概要设计](需求分析与概要设计.md)：需求、架构、数据模型、接口和验收场景。
+- [团队分工与解耦方案](团队分工与解耦方案.md)：四人分工、表与接口归属、契约冻结与工期安排。
+- [接口契约](docs/Interfaces.md)：状态机、QueueAPI、AuditAPI、ObjectStore、HTTP 接口与契约测试清单。
+- [契约修订提案](docs/契约待澄清项.md)：实现时发现的契约歧义、决议与待确认项，第 1 周评审后打 `contract-v1`。
 - [课程设计汇报 PPT](OS课设-实验设计汇报-持久化队列-多色语义版.pptx)
 
 ## 目标范围
@@ -20,17 +23,18 @@
 - 以 base_version 检测并发修改，保留历史版本和冲突副本。
 - 使用短租约协调编辑，并记录追加式操作审计。
 
-## 建议模块分工
+## 四人分工
 
-按团队人数拆分；同一张数据库表或状态机应明确唯一负责人，跨模块接口先在需求文档或 PR 中约定。
+按人数把系统拆成四条可独立开发、独立测试、独立验收的线；同一张数据库表或状态机只有唯一负责人，跨模块接口先在需求文档或 PR 中约定。每条线都包含实现、单测、契约测试和验收场景，集成与脚本工作由四人分担。
 
-| 模块 | 主要工作 |
-| --- | --- |
-| 数据模型与持久化队列 | SQLite schema、事务、claim/ack/nack、重试和恢复 |
-| 投递与文件传输 | 投递状态机、确认决策、分片校验、断点续传和原子发布 |
-| 项目空间与版本 | 成员权限、版本历史、base_version 冲突检测和冲突副本 |
-| 租约、审计与管理界面 | 锁续期与回收、审计查询、任务和队列可观测性 |
-| 集成与验收 | 进程启动脚本、故障注入、五类验收场景和演示材料 |
+| 成员 | 角色 | 主要工作 |
+| --- | --- | --- |
+| P1 | 队列内核 | SQLite schema、事务、状态机、claim/ack/nack、重试、恢复、queue-daemon |
+| P2 | 会话与投递编排 | 会话与心跳、离线唤醒、确认/拒绝/延迟、管理端只读接口、启停脚本 |
+| P3 | 协作与并发 | 成员权限、版本历史、base_version 冲突检测、冲突副本、租约 |
+| P4 | 传输与对象存储 | 分片读写与校验、断点续传、原子发布、对象目录、审计库 |
+
+详细分工、接口归属、契约冻结与工期安排见 [团队分工与解耦方案](团队分工与解耦方案.md)。
 
 ## 协作约定
 
@@ -51,4 +55,23 @@
 
 ## 当前状态
 
-本仓库起始内容为课程设计需求、概要设计和汇报材料。实现代码、技术栈及运行说明由小组在后续开发中补充。
+- **P1（队列内核）骨架已就绪**：`db/schema.sql`、`src/common/`、`src/storage/`、`src/daemon/`、`scripts/kill_daemon.sh`、`tests/contract/test_queue.py`。
+- 技术栈：Python 3.10+ 标准库（`sqlite3`），无第三方依赖；测试用 `unittest`（`pytest` 也能收集）。
+- P2/P3/P4 的目录按团队分工创建；各自的表为 `db/schema.sql` 中的草案，评审后由 P1 落库。
+
+## 运行（P1 骨架）
+
+```bash
+# 空目录一键建库（创建 data/db、data/tmp、data/objects、data/logs）
+python3 -c "from src.storage.db import init_database; init_database('data/db/queue.db')"
+
+# 契约测试：C-01 ~ C-05、C-09、C-10 与投递主流程
+python3 -m unittest discover -s tests/contract -t .
+
+# 启动 queue-daemon（--once 只跑一个调度周期）
+python3 -m src.daemon.main --init-db --db data/db/queue.db --interval-ms 500
+
+# 验收场景 5：优雅停止 vs 模拟崩溃
+SIGNAL=-TERM scripts/kill_daemon.sh
+scripts/kill_daemon.sh
+```
