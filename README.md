@@ -56,6 +56,7 @@
 ## 当前状态
 
 - **P1（队列内核）骨架已就绪**：`db/schema.sql`、`src/common/`、`src/storage/`、`src/daemon/`、`scripts/kill_daemon.sh`、`tests/contract/test_queue.py`。
+- 验收场景 5（崩溃恢复）已实跑通过并留有记录：`tests/acceptance/crash_recovery.md`。
 - 技术栈：Python 3.10+ 标准库（`sqlite3`），无第三方依赖；测试用 `unittest`（`pytest` 也能收集）。
 - P2/P3/P4 的目录按团队分工创建；各自的表为 `db/schema.sql` 中的草案，评审后由 P1 落库。
 
@@ -70,6 +71,12 @@ python3 -m unittest discover -s tests/contract -t .
 
 # 启动 queue-daemon（--once 只跑一个调度周期）
 python3 -m src.daemon.main --init-db --db data/db/queue.db --interval-ms 500
+
+# 存量库升级（按 db/migrations/*.sql 顺序应用，可重复调用；迁移须写成幂等 DDL）
+python3 -c "from src.storage.db import connect, apply_migrations; print(apply_migrations(connect('data/db/queue.db')))"
+
+# 验收场景 5：崩溃恢复（起 daemon -> 传到 40% -> kill -9 -> 重启 -> 重新认领）
+WORK_DIR=/tmp/crash-recovery-demo tests/acceptance/run_crash_recovery.sh
 
 # 验收场景 5：优雅停止 vs 模拟崩溃
 SIGNAL=-TERM scripts/kill_daemon.sh
