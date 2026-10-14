@@ -1,6 +1,6 @@
 # 接口契约（contract-v1 草案）
 
-本文档是四人小组并行开发的**唯一接口依据**，配合 [团队分工与解耦方案](../团队分工与解耦方案.md) 使用。
+本文档是 SyncBox 团队并行开发的**唯一接口依据**，配合 [模块划分与依赖](模块划分与依赖.md) 与 [模块认领与协作方案](../模块认领与协作方案.md) 使用。
 
 ## 0 使用说明
 
@@ -310,14 +310,16 @@ HTTP 状态码：`200` 成功；`400` `InvalidArgument`；`401` `Unauthorized`�
 
 ## 6 数据表归属（一表一主）
 
-DDL 与迁移脚本只能由 P1 提交；其他成员以字段需求的形式提出变更。
+DDL 与迁移脚本只能由 M02（线 A）提交；其他成员以字段需求的形式提出变更。
 
-| 表 | 所有者 | 允许写入方 |
-|---|---|---|
-| `delivery_tasks`、`task_chunks`、`queue_claims` | P1 | 仅 P1 |
-| `users` | P2 | 仅 P2 |
-| `project_spaces`、`space_members`、`files`、`file_versions`、`leases` | P3 | 仅 P3 |
-| `audit_logs` | P4 | 仅 P4（P1/P2/P3 通过 `audit.write`） |
+| 表 | 所属模块 | 所有者 | 允许写入方 |
+|---|---|---|---|
+| `delivery_tasks`、`task_chunks`、`queue_claims`、`task_events` | M02 | 线 A | 仅线 A |
+| `users` | M05 | 线 B | 仅线 B |
+| `project_spaces`、`space_members` | M07 | 线 C | 仅线 C |
+| `files`、`file_versions` | M08 | 线 C | 仅线 C |
+| `leases` | M09 | 线 C | 仅线 C |
+| `audit_logs` | M04 | 线 D | 仅线 D（其他线通过 `audit.write`） |
 
 跨模块需要同事务时，只允许通过 `audit.join_tx(tx)` 或 `QueueAPI` 的显式入参传递事务句柄，**禁止 A 模块开事务直接写 C 表**。
 
@@ -325,7 +327,7 @@ DDL 与迁移脚本只能由 P1 提交；其他成员以字段需求的形式提
 
 ## 7 契约测试清单（按接口归属维护）
 
-`tests/contract/` 至少覆盖以下条目，任何一条失败即拒绝合并。用例按模块拆分：`test_queue.py`（P1）、`test_http.py`（P2）、`test_collab.py`（P3）、`test_objectstore.py`（P4），公共基座与 CI 门禁由 P2 汇总。
+`tests/contract/` 至少覆盖以下条目，任何一条失败即拒绝合并。用例按模块拆分：`test_queue.py`（M02/M03）、`test_http.py`（M05/M06/M12）、`test_collab.py`（M07/M08/M09）、`test_objectstore.py`（M10/M11），公共基座与 CI 门禁由线 B 汇总。
 
 | 编号 | 检查内容 | 维护人 |
 |---|---|---|
@@ -350,3 +352,4 @@ DDL 与迁移脚本只能由 P1 提交；其他成员以字段需求的形式提
 | contract-v1（草案） | — | 初稿，待第 1 周评审后冻结并打 tag | 全组 |
 | contract-v1（草案）修订 | 2026-10-13 | `ObjectStore` 归属由 P2 调整为 P4，管理端只读接口归属由 P4 调整为 P2，传输语义明确归 P4；契约测试清单增加维护人列 | 全组 |
 | contract-v1 修订提案 | 2026-10-13 | ①`queued` 不再可被 `claim`，新增 `dispatch_immediate` 流转（无需确认的任务）；②`nack` 超限「先提交 failed 再抛 `RetryExhausted`」；③新增 `set_delay` 与 `set_online_probe`；④明确 payload 冗余列、分片规则与 `task_chunks.checksum` 语义；⑤P1 通过 `join_tx` 写审计 | 待 P2、P4 确认 |
+| 模块化改版 | 2026-10-14 | 项目更名为 SyncBox；表与用例归属由 P1～P4 改为模块 ID（`M01`～`M15`）与四条工作线 A～D；配套《模块划分与依赖》《模块认领与协作方案》 | 全组 |

@@ -1,17 +1,17 @@
 -- 0001 初始结构（基线迁移）
--- 归属：P1 独占维护。其他成员以「字段需求」的形式提出变更，由 P1 落库（见 docs/Interfaces.md §6）。
+-- 归属：M02（线 A）独占维护。其他成员以「字段需求」的形式提出变更，由 M02 落库（见 docs/Interfaces.md §6）。
 -- 应用：apply_migrations() 按文件名顺序执行，已应用的名字记在 schema_migrations 表。
 -- 要求：迁移里的 DDL 必须写成幂等形式（IF NOT EXISTS 等），重复执行不得报错；
 --       新建库走 db/schema.sql，存量库走本目录的迁移，两者结构一致性由契约测试 C-13 校验。
 
 PRAGMA foreign_keys = ON;
 
--- ============================ P1 独占：持久化队列 ============================
+-- ============================ M02（线 A）独占：持久化队列内核 ============================
 
 CREATE TABLE IF NOT EXISTS delivery_tasks (
     task_id       TEXT PRIMARY KEY,              -- 创建方生成，全局唯一且不可变
     kind          TEXT NOT NULL,                 -- 任务类型，取值见 TASK_KINDS
-    payload       TEXT NOT NULL,                 -- JSON 字符串，P1 原样存储，不解释业务字段
+    payload       TEXT NOT NULL,                 -- JSON 字符串，M02 原样存储，不解释业务字段
     state         TEXT NOT NULL,                 -- 见 src/storage/statemachine.py 的 STATES
     sender_id     TEXT,                          -- 路由冗余列：仅从 payload 提取 sender_id/receiver_id/size_bytes
     receiver_id   TEXT,
@@ -60,16 +60,16 @@ CREATE TABLE IF NOT EXISTS task_events (
     event      TEXT    NOT NULL,                  -- 见 src/storage/events.py 的 EVENT_TYPES
     from_state TEXT,
     to_state   TEXT,
-    actor      TEXT    NOT NULL,                  -- P1 / P2 / P3 / P4
+    actor      TEXT    NOT NULL,                  -- 线 A / B / C / D
     detail     TEXT,                              -- JSON 字符串
     created_at INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_task ON task_events(task_id, event_id);
 
--- ============================ 其他负责人独占（字段草案，待第 1 周评审确认） ============================
+-- ============================ 其他模块独占（字段草案，待第 1 周评审确认） ============================
 
--- P2 独占：用户会话
+-- M05（线 B）独占：用户会话
 CREATE TABLE IF NOT EXISTS users (
     user_id      TEXT PRIMARY KEY,
     display_name TEXT,
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS users (
     last_seen    INTEGER
 );
 
--- P3 独占：项目空间、成员、版本与租约
+-- M07/M08/M09（线 C）独占：项目空间、成员、版本与租约
 CREATE TABLE IF NOT EXISTS project_spaces (
     space_id   TEXT PRIMARY KEY,
     name       TEXT NOT NULL,
@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS leases (
 
 CREATE INDEX IF NOT EXISTS idx_leases_expiry ON leases(expires_at);
 
--- P4 独占：追加式审计
+-- M04（线 D）独占：追加式审计
 CREATE TABLE IF NOT EXISTS audit_logs (
     log_id      INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type  TEXT NOT NULL,                    -- <模块>.<动作>

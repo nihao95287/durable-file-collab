@@ -1,9 +1,9 @@
-"""queue-daemon 进程（P1）。
+"""queue-daemon 进程（M03 / 线 A）。
 
 职责（docs/Interfaces.md 与团队分工 3.1）：
 
 1. 启动时执行一次 recover()，此后按 recover_every_ms 周期执行（崩溃恢复）；
-2. 执行注册进来的定时钩子（P2 的延迟到期检查、P3 的租约过期回收）；
+2. 执行注册进来的定时钩子（线 B 的延迟到期检查、线 C 的租约过期回收）；
 3. 把 queued 任务按接收方在线状态分流到 waiting_online / waiting_confirm；
 4. 被 SIGKILL 杀掉后，重启即可从 SQLite 恢复未完成任务（验收场景 5）。
 
@@ -112,7 +112,7 @@ def write_pidfile(pidfile: Path) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="queue-daemon", description="持久化队列守护进程（P1）")
+    parser = argparse.ArgumentParser(prog="queue-daemon", description="SyncBox 队列守护进程（M03 / 线 A）")
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH), help="SQLite 数据库路径")
     parser.add_argument("--interval-ms", type=int, default=500, help="调度周期")
     parser.add_argument("--recover-every-ms", type=int, default=5_000, help="恢复扫描周期")
@@ -120,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--visibility-timeout-ms",
         type=int,
         default=30_000,
-        help="claim 可见性超时（P1 配置项；演示/验收时可调小）",
+        help="claim 可见性超时（M02 配置项；演示/验收时可调小）",
     )
     parser.add_argument("--pidfile", default=str(DEFAULT_PIDFILE), help="pid 文件路径")
     parser.add_argument("--once", action="store_true", help="只执行一个调度周期后退出")
